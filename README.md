@@ -11,12 +11,19 @@ The project contains two key ideas:
 
 ```text
 {RoleAssignment}
+{Delimiter}
 {PerspectiveSetting}
+{Delimiter}
 {ContextInfo}
+{Delimiter}
 {TaskInstruction}
+{Delimiter}
 {LabelSetDefinition}
+{Delimiter}
 {OutputFormat}
+{Delimiter}
 {ReasoningDirective}
+{Delimiter}
 {FewShotBlock}
 {Delimiter}
 Classify whether the following employee feedback is a Compliment or Development feedback:
@@ -24,8 +31,11 @@ Classify whether the following employee feedback is a Compliment or Development 
 {Text}
 {Delimiter}
 {ExplanationRequirement}
+{Delimiter}
 {ConfidenceInstruction}
+{Delimiter}
 {AnswerLength}
+{Delimiter}
 {TemperatureHint}
 ```
 
