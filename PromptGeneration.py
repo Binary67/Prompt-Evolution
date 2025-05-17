@@ -1,5 +1,6 @@
 import random
 import re
+import pandas as pd
 
 def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-feedback analysis.") -> dict:
     """
@@ -229,3 +230,78 @@ def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str) -> pd.DataFrame:
     Result = DataFrame.copy()
     Result["Prediction"] = Predictions
     return Result
+
+
+def CalculateFitnessScore(ResultFrame: pd.DataFrame) -> float:
+    """Return classification accuracy from a result DataFrame.
+
+    The ``Prediction`` column can contain full sentences. This function extracts
+    either ``compliment`` or ``development`` from each prediction and compares it
+    to the ``classification`` column, ignoring case.
+    """
+
+    Pattern = re.compile(r"(compliment|development)", re.IGNORECASE)
+    CorrectCount = 0
+
+    for Prediction, Actual in zip(ResultFrame.get("Prediction", []), ResultFrame.get("classification", [])):
+        if not isinstance(Prediction, str):
+            continue
+        Match = Pattern.search(Prediction)
+        if not Match:
+            continue
+
+        NormalizedPred = Match.group(1).lower()
+        if isinstance(Actual, str) and NormalizedPred == Actual.strip().lower():
+            CorrectCount += 1
+
+    FitnessScore = CorrectCount / len(ResultFrame) if len(ResultFrame) else 0.0
+    return FitnessScore
+
+
+def GeneratePopulation(PopulationSize: int) -> list:
+    """Create an initial population of prompts."""
+
+    return [GeneratePromptSample() for _ in range(PopulationSize)]
+
+
+def MutatePrompt(Prompt: dict, MutationRate: float) -> dict:
+    """Mutate fields within ``Prompt`` with probability ``MutationRate``."""
+
+    for Field in PromptSkeletonKeys:
+        if random.random() < MutationRate:
+            MutatePromptField(Prompt, Field)
+    return Prompt
+
+
+def EvaluatePrompt(Prompt: dict, DataFrame: pd.DataFrame) -> float:
+    """Compute the fitness score for ``Prompt`` on ``DataFrame``."""
+
+    PromptText = CombineString(Prompt)
+    ResultFrame = ApplyPromptToData(DataFrame, PromptText)
+    return CalculateFitnessScore(ResultFrame)
+
+
+def RunEvolution(DataFrame: pd.DataFrame, PopulationSize: int, Generations: int,
+                 MutationRate: float = 0.1, CrossoverProbability: float = 0.5,
+                 Elitism: int = 1) -> list:
+    """Evolve prompts over multiple generations."""
+
+    Population = GeneratePopulation(PopulationSize)
+
+    for _ in range(Generations):
+        Scores = [EvaluatePrompt(Prompt, DataFrame) for Prompt in Population]
+        ScoredPopulation = list(zip(Population, Scores))
+        ScoredPopulation.sort(key=lambda Item: Item[1], reverse=True)
+
+        NewPopulation = [Item[0] for Item in ScoredPopulation[:Elitism]]
+
+        while len(NewPopulation) < PopulationSize:
+            ParentOne = random.choice(Population)
+            ParentTwo = random.choice(Population)
+            Child = Crossover(ParentOne, ParentTwo, CrossoverProbability)
+            Child = MutatePrompt(Child, MutationRate)
+            NewPopulation.append(Child)
+
+        Population = NewPopulation
+
+    return Population
