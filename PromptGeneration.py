@@ -1,7 +1,6 @@
 import random
 import re
 
-
 def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-feedback analysis.") -> dict:
     """
     Calls Azure OpenAI once and returns a dictionary describing a prompt.
@@ -154,3 +153,79 @@ def Crossover(ParentOne: dict, ParentTwo: dict, Probability: float = 0.5) -> dic
     ChildPrompt["Text"] = ParentOne.get("Text", ParentTwo.get("Text", ""))
 
     return ChildPrompt
+
+def MutatePromptField(Prompt: dict, Field: str) -> None:
+    """Rephrase a slot in ``Prompt`` using Azure OpenAI."""
+
+    if Field not in Prompt or not Prompt[Field]:
+        return
+
+    SystemMessage = {
+        "role": "system",
+        "content": "You are a helpful rewriting assistant.",
+    }
+
+    UserMessage = {
+        "role": "user",
+        "content": f"Rephrase the following so it keeps the same meaning:\n{Prompt[Field]}",
+    }
+
+    Response = client.chat.completions.create(
+        model = 'gpt-4o',
+        messages = [SystemMessage, UserMessage],
+        temperature = 1,
+    )
+
+    Prompt[Field] = Response.choices[0].message.content.strip()
+
+    return Prompt
+
+def CombineString(dictPrompt):
+
+  CombinedString = ""
+  for value in dictPrompt.values():
+      if isinstance(value, str):
+          CombinedString += value + "\n"
+
+  return CombinedString
+
+
+def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str) -> pd.DataFrame:
+    """Apply a classification ``Prompt`` to each feedback entry in ``DataFrame``.
+
+    Parameters
+    ----------
+    DataFrame : pandas.DataFrame
+        Contains ``feedback`` and ``classification`` columns.
+    Prompt : str
+        The prompt text that includes a ``{Text}`` placeholder.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of ``DataFrame`` with a new ``Prediction`` column.
+    """
+
+    Predictions = []
+    for Feedback in DataFrame["feedback"]:
+        FilledPrompt = Prompt.replace("{Text}", Feedback)
+
+        SystemMessage = {
+            "role": "system",
+            "content": "You are a helpful classification assistant.",
+        }
+
+        UserMessage = {"role": "user", "content": FilledPrompt}
+
+        Response = client.chat.completions.create(
+            model='gpt-4o',
+            messages=[SystemMessage, UserMessage],
+            temperature=0,
+        )
+
+        Prediction = Response.choices[0].message.content.strip()
+        Predictions.append(Prediction)
+
+    Result = DataFrame.copy()
+    Result["Prediction"] = Predictions
+    return Result
