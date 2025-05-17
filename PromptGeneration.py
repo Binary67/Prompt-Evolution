@@ -1,7 +1,12 @@
-def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-feedback analysis.") -> str:
+import random
+import re
+
+
+def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-feedback analysis.") -> dict:
     """
-    Calls Azure OpenAI once and returns a single, fully-formed prompt string
-    (except for {Text}, which stays as a placeholder).
+    Calls Azure OpenAI once and returns a dictionary describing a prompt.
+    The returned mapping includes every slot from the skeleton, and the
+    ``Text`` field is preserved as a placeholder.
 
     Parameters
     ----------
@@ -10,19 +15,27 @@ def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-fe
 
     Returns
     -------
-    str
-        A ready-to-use prompt for classifying feedback into
-        'Compliment' or 'Development'.
+    dict
+        A mapping of prompt slots to the generated text. The placeholder
+        ``Text`` remains in the output so you can insert your own content
+        later.
     """
 
 
     PromptSkeleton = """{RoleAssignment}
+{Delimiter}
 {PerspectiveSetting}
+{Delimiter}
 {ContextInfo}
+{Delimiter}
 {TaskInstruction}
+{Delimiter}
 {LabelSetDefinition}
+{Delimiter}
 {OutputFormat}
+{Delimiter}
 {ReasoningDirective}
+{Delimiter}
 {FewShotBlock}
 {Delimiter}
 Classify whether the following employee feedback is a Compliment or Development feedback:
@@ -30,8 +43,11 @@ Classify whether the following employee feedback is a Compliment or Development 
 {Text}
 {Delimiter}
 {ExplanationRequirement}
+{Delimiter}
 {ConfidenceInstruction}
+{Delimiter}
 {AnswerLength}
+{Delimiter}
 {TemperatureHint}"""
 
     SystemMessage = {
@@ -59,4 +75,82 @@ Classify whether the following employee feedback is a Compliment or Development 
 
     PromptResult = Response.choices[0].message.content.strip()
 
-    return PromptResult
+    return ParsePromptWithDelimiter(PromptResult)
+
+
+def ParsePromptWithDelimiter(PromptText: str) -> dict:
+    """Parse a prompt string that uses a consistent delimiter between slots."""
+
+    PromptLines = [Line.rstrip() for Line in PromptText.splitlines()]
+    if len(PromptLines) < 3:
+        return {}
+
+    DelimiterToken = PromptLines[1]
+
+    Segments = []
+    CurrentSegment = [PromptLines[0]]
+    for Line in PromptLines[1:]:
+        if Line.strip() == DelimiterToken:
+            Segments.append("\n".join(CurrentSegment).strip())
+            CurrentSegment = []
+        else:
+            CurrentSegment.append(Line)
+    if CurrentSegment:
+        Segments.append("\n".join(CurrentSegment).strip())
+
+    if len(Segments) < 14:
+        return {}
+
+    ParsedPrompt = {
+        "RoleAssignment": Segments[0],
+        "PerspectiveSetting": Segments[1],
+        "ContextInfo": Segments[2],
+        "TaskInstruction": Segments[3],
+        "LabelSetDefinition": Segments[4],
+        "OutputFormat": Segments[5],
+        "ReasoningDirective": Segments[6],
+        "FewShotBlock": Segments[7],
+        "Text": Segments[9],
+        "ExplanationRequirement": Segments[10],
+        "ConfidenceInstruction": Segments[11],
+        "AnswerLength": Segments[12],
+        "TemperatureHint": Segments[13],
+    }
+
+    return ParsedPrompt
+
+
+PromptSkeletonKeys = [
+    "RoleAssignment",
+    "PerspectiveSetting",
+    "ContextInfo",
+    "TaskInstruction",
+    "LabelSetDefinition",
+    "OutputFormat",
+    "ReasoningDirective",
+    "FewShotBlock",
+    "ExplanationRequirement",
+    "ConfidenceInstruction",
+    "AnswerLength",
+    "TemperatureHint",
+]
+
+
+def Crossover(ParentOne: dict, ParentTwo: dict, Probability: float = 0.5) -> dict:
+    """Perform uniform crossover on prompt dictionaries.
+
+    Each slot defined in :data:`PromptSkeletonKeys` is randomly selected from
+    either ``ParentOne`` or ``ParentTwo`` based on ``Probability``. The ``Text``
+    element is copied from ``ParentOne`` without modification.
+    """
+
+    ChildPrompt = {}
+    for SlotName in PromptSkeletonKeys:
+        if random.random() < Probability:
+            ChildPrompt[SlotName] = ParentOne.get(SlotName, "")
+        else:
+            ChildPrompt[SlotName] = ParentTwo.get(SlotName, "")
+
+    ChildPrompt["Text"] = ParentOne.get("Text", ParentTwo.get("Text", ""))
+
+    return ChildPrompt
