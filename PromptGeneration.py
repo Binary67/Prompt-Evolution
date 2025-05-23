@@ -1,8 +1,46 @@
 import random
 import re
 import pandas as pd
+from openai import AzureOpenAI
+import os
 
-def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-feedback analysis.") -> dict:
+os.environ["AZURE_OPENAI_API_KEY"] = "3026be1058fa4f0c9e3416d3d8227657"
+os.environ["AZURE_OPENAI_ENDPOINT"] = "https://ptsg-5talendopenai01.openai.azure.com/"
+os.environ["AZURE_OPENAI_API_VERSION"] = "2024-02-01"
+os.environ["AZURE_OPENAI_DEPLOYMENT"] = "myTalentX_GPT4omini"
+
+client = AzureOpenAI(
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+)
+
+class ClassificationTaskConfig:
+    """Configuration for classification tasks."""
+    def __init__(self, Labels, TaskDescription=None, DataColumnName="text", LabelColumnName="label"):
+        """
+        Parameters
+        ----------
+        Labels : list
+            List of classification labels (e.g., ["positive", "negative"] or ["compliment", "development"])
+        TaskDescription : str, optional
+            Custom task description. If None, generates default based on labels
+        DataColumnName : str
+            Name of the column containing text to classify (default: "text")
+        LabelColumnName : str
+            Name of the column containing true labels (default: "label")
+        """
+        self.Labels = Labels
+        self.DataColumnName = DataColumnName
+        self.LabelColumnName = LabelColumnName
+        
+        if TaskDescription is None:
+            LabelStr = " or ".join(Labels)
+            self.TaskDescription = f"Classify the following text as {LabelStr}:"
+        else:
+            self.TaskDescription = TaskDescription
+
+def GeneratePromptSample(TaskConfig: ClassificationTaskConfig, RoleAssignment: str = "You are an expert classification assistant.") -> dict:
     """
     Calls Azure OpenAI once and returns a dictionary describing a prompt.
     The returned mapping includes every slot from the skeleton, and the
@@ -10,6 +48,8 @@ def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-fe
 
     Parameters
     ----------
+    TaskConfig : ClassificationTaskConfig
+        Configuration object containing labels and task description
     RoleAssignment : str, optional
         A custom persona you want at the top of the prompt.
 
@@ -38,7 +78,7 @@ def GeneratePromptSample(RoleAssignment: str = "You are an expert in employee-fe
 {Delimiter}
 {FewShotBlock}
 {Delimiter}
-Classify whether the following employee feedback is a Compliment or Development feedback:
+{TaskDescription}
 {Delimiter}
 {Text}
 {Delimiter}
@@ -55,15 +95,16 @@ Classify whether the following employee feedback is a Compliment or Development 
         "content": "You are a top-tier prompt-engineering assistant."
     }
 
+    LabelStr = " and ".join(TaskConfig.Labels)
     UserMessage = {
         "role": "user",
         "content": (
-            "Using the skeleton below, generate a COMPLETE prompt for classifying "
-            "talent feedback into two labels: Compliment and Development. "
-            "• Replace every slot **except {Text} and the {Delimiter} tokens** with suitable content. "
+            f"Using the skeleton below, generate a COMPLETE prompt for classifying "
+            f"text into these labels: {LabelStr}. "
+            "• Replace every slot **except {Text}, {TaskDescription}, and the {Delimiter} tokens** with suitable content. "
             "• Keep placeholders wrapped in curly braces exactly as shown. "
             "• Output ONLY the finished prompt, nothing else.\n\n"
-            + PromptSkeleton.replace("{RoleAssignment}", RoleAssignment)
+            + PromptSkeleton.replace("{RoleAssignment}", RoleAssignment).replace("{TaskDescription}", TaskConfig.TaskDescription)
         )
     }
 
@@ -191,15 +232,17 @@ def CombineString(dictPrompt):
   return CombinedString
 
 
-def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str) -> pd.DataFrame:
-    """Apply a classification ``Prompt`` to each feedback entry in ``DataFrame``.
+def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str, TaskConfig: ClassificationTaskConfig) -> pd.DataFrame:
+    """Apply a classification ``Prompt`` to each text entry in ``DataFrame``.
 
     Parameters
     ----------
     DataFrame : pandas.DataFrame
-        Contains ``feedback`` and ``classification`` columns.
+        Contains data and label columns as specified in TaskConfig.
     Prompt : str
         The prompt text that includes a ``{Text}`` placeholder.
+    TaskConfig : ClassificationTaskConfig
+        Configuration specifying column names and labels.
 
     Returns
     -------
@@ -208,8 +251,8 @@ def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str) -> pd.DataFrame:
     """
 
     Predictions = []
-    for Feedback in DataFrame["feedback"]:
-        FilledPrompt = Prompt.replace("{Text}", Feedback)
+    for TextData in DataFrame[TaskConfig.DataColumnName]:
+        FilledPrompt = Prompt.replace("{Text}", TextData)
 
         SystemMessage = {
             "role": "system",
@@ -232,18 +275,20 @@ def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str) -> pd.DataFrame:
     return Result
 
 
-def CalculateFitnessScore(ResultFrame: pd.DataFrame) -> float:
+def CalculateFitnessScore(ResultFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig) -> float:
     """Return classification accuracy from a result DataFrame.
 
     The ``Prediction`` column can contain full sentences. This function extracts
-    either ``compliment`` or ``development`` from each prediction and compares it
-    to the ``classification`` column, ignoring case.
+    any of the valid labels from each prediction and compares it
+    to the label column, ignoring case.
     """
 
-    Pattern = re.compile(r"(compliment|development)", re.IGNORECASE)
+    # Create pattern from valid labels
+    LabelPattern = "|".join(re.escape(Label) for Label in TaskConfig.Labels)
+    Pattern = re.compile(f"({LabelPattern})", re.IGNORECASE)
     CorrectCount = 0
 
-    for Prediction, Actual in zip(ResultFrame.get("Prediction", []), ResultFrame.get("classification", [])):
+    for Prediction, Actual in zip(ResultFrame.get("Prediction", []), ResultFrame.get(TaskConfig.LabelColumnName, [])):
         if not isinstance(Prediction, str):
             continue
         Match = Pattern.search(Prediction)
@@ -258,10 +303,10 @@ def CalculateFitnessScore(ResultFrame: pd.DataFrame) -> float:
     return FitnessScore
 
 
-def GeneratePopulation(PopulationSize: int) -> list:
+def GeneratePopulation(PopulationSize: int, TaskConfig: ClassificationTaskConfig) -> list:
     """Create an initial population of prompts."""
 
-    return [GeneratePromptSample() for _ in range(PopulationSize)]
+    return [GeneratePromptSample(TaskConfig) for _ in range(PopulationSize)]
 
 
 def MutatePrompt(Prompt: dict, MutationRate: float) -> dict:
@@ -273,23 +318,24 @@ def MutatePrompt(Prompt: dict, MutationRate: float) -> dict:
     return Prompt
 
 
-def EvaluatePrompt(Prompt: dict, DataFrame: pd.DataFrame) -> float:
+def EvaluatePrompt(Prompt: dict, DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig) -> float:
     """Compute the fitness score for ``Prompt`` on ``DataFrame``."""
 
     PromptText = CombineString(Prompt)
-    ResultFrame = ApplyPromptToData(DataFrame, PromptText)
-    return CalculateFitnessScore(ResultFrame)
+    ResultFrame = ApplyPromptToData(DataFrame, PromptText, TaskConfig)
+    return CalculateFitnessScore(ResultFrame, TaskConfig)
 
 
-def RunEvolution(DataFrame: pd.DataFrame, PopulationSize: int, Generations: int,
+def RunEvolution(DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig, 
+                 PopulationSize: int, Generations: int,
                  MutationRate: float = 0.1, CrossoverProbability: float = 0.5,
                  Elitism: int = 1) -> list:
     """Evolve prompts over multiple generations."""
 
-    Population = GeneratePopulation(PopulationSize)
+    Population = GeneratePopulation(PopulationSize, TaskConfig)
 
     for _ in range(Generations):
-        Scores = [EvaluatePrompt(Prompt, DataFrame) for Prompt in Population]
+        Scores = [EvaluatePrompt(Prompt, DataFrame, TaskConfig) for Prompt in Population]
         ScoredPopulation = list(zip(Population, Scores))
         ScoredPopulation.sort(key=lambda Item: Item[1], reverse=True)
 
