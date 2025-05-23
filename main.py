@@ -1,105 +1,111 @@
 import pandas as pd
+import asyncio
 from PromptGeneration import RunEvolution, EvaluatePrompt, CombineString, ClassificationTaskConfig
-from openai import AzureOpenAI
-import os
 
-os.environ["AZURE_OPENAI_API_KEY"] = "3026be1058fa4f0c9e3416d3d8227657"
-os.environ["AZURE_OPENAI_ENDPOINT"] = "https://ptsg-5talendopenai01.openai.azure.com/"
-os.environ["AZURE_OPENAI_API_VERSION"] = "2024-02-01"
-os.environ["AZURE_OPENAI_DEPLOYMENT"] = "myTalentX_GPT4omini"
+async def main():
+    ###################################################
+    ### Example 1: Employee Feedback Classification ###
+    ###################################################
 
-client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-)
+    print("Example 1: Employee Feedback Classification")
+    print("-"*50)
 
-###################################################
-### Example 1: Employee Feedback Classification ###
-###################################################
+    FeedbackData = pd.DataFrame([
+        {"feedback": "Great job on the project", "classification": "compliment"},
+        {"feedback": "Needs improvement in communication", "classification": "development"},
+        {"feedback": "Excellent presentation skills", "classification": "compliment"},
+        {"feedback": "Consider working on time management", "classification": "development"},
+    ])
 
-print("Example 1: Employee Feedback Classification")
-print("-"*50)
+    # Configure for feedback classification
+    FeedbackConfig = ClassificationTaskConfig(
+        Labels=["compliment", "development"],
+        TaskDescription="Classify whether the following employee feedback is a Compliment or Development feedback:",
+        DataColumnName="feedback",
+        LabelColumnName="classification"
+    )
 
-FeedbackData = pd.DataFrame([
-    {"feedback": "Great job on the project", "classification": "compliment"},
-    {"feedback": "Needs improvement in communication", "classification": "development"},
-    {"feedback": "Excellent presentation skills", "classification": "compliment"},
-    {"feedback": "Consider working on time management", "classification": "development"},
-])
+    PopulationSize = 4
+    Generations = 2
 
-# Configure for feedback classification
-FeedbackConfig = ClassificationTaskConfig(
-    Labels=["compliment", "development"],
-    TaskDescription="Classify whether the following employee feedback is a Compliment or Development feedback:",
-    DataColumnName="feedback",
-    LabelColumnName="classification"
-)
+    FinalPopulation = await RunEvolution(FeedbackData, FeedbackConfig, PopulationSize, Generations)
+    
+    # Evaluate final population in parallel
+    EvaluationTasks = [EvaluatePrompt(Prompt, FeedbackData, FeedbackConfig) for Prompt in FinalPopulation]
+    Scores = await asyncio.gather(*EvaluationTasks)
+    
+    BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
+    BestPrompt = FinalPopulation[BestIndex]
+    BestScore = Scores[BestIndex]
 
-PopulationSize = 4
-Generations = 2
+    print("\nBest Prompt:\n", CombineString(BestPrompt))
+    print("Fitness Score:", BestScore)
 
-FinalPopulation = RunEvolution(FeedbackData, FeedbackConfig, PopulationSize, Generations)
-Scores = [EvaluatePrompt(Prompt, FeedbackData, FeedbackConfig) for Prompt in FinalPopulation]
-BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
-BestPrompt = FinalPopulation[BestIndex]
-BestScore = Scores[BestIndex]
+    #####################################
+    ### Example 2: Sentiment Analysis ###
+    #####################################
 
-print("Best Prompt:\n", CombineString(BestPrompt))
-print("Fitness Score:", BestScore)
+    print("\n\nExample 2: Sentiment Analysis")
+    print("-"*50)
 
-#####################################
-### Example 2: Sentiment Analysis ###
-#####################################
+    SentimentData = pd.DataFrame([
+        {"text": "I love this product! It's amazing!", "label": "positive"},
+        {"text": "This is terrible, worst purchase ever", "label": "negative"},
+        {"text": "It's okay, nothing special", "label": "neutral"},
+        {"text": "Absolutely fantastic experience", "label": "positive"},
+    ])
 
-print("\n\nExample 2: Sentiment Analysis")
-print("-"*50)
+    # Configure for sentiment analysis
+    SentimentConfig = ClassificationTaskConfig(
+        Labels=["positive", "negative", "neutral"],
+        DataColumnName="text",
+        LabelColumnName="label"
+    )
 
-SentimentData = pd.DataFrame([
-    {"text": "I love this product! It's amazing!", "label": "positive"},
-    {"text": "This is terrible, worst purchase ever", "label": "negative"},
-    {"text": "It's okay, nothing special", "label": "neutral"},
-    {"text": "Absolutely fantastic experience", "label": "positive"},
-])
+    print("Running evolution for sentiment analysis...")
+    FinalPopulation = await RunEvolution(SentimentData, SentimentConfig, PopulationSize, Generations)
+    
+    # Evaluate final population in parallel
+    EvaluationTasks = [EvaluatePrompt(Prompt, SentimentData, SentimentConfig) for Prompt in FinalPopulation]
+    Scores = await asyncio.gather(*EvaluationTasks)
+    
+    BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
+    BestScore = Scores[BestIndex]
 
-# Configure for sentiment analysis
-SentimentConfig = ClassificationTaskConfig(
-    Labels=["positive", "negative", "neutral"],
-    DataColumnName="text",
-    LabelColumnName="label"
-)
+    print(f"\nBest fitness score for sentiment analysis: {BestScore}")
 
-print("Running evolution for sentiment analysis...")
-FinalPopulation = RunEvolution(SentimentData, SentimentConfig, PopulationSize, Generations)
-Scores = [EvaluatePrompt(Prompt, SentimentData, SentimentConfig) for Prompt in FinalPopulation]
-BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
-BestScore = Scores[BestIndex]
+    ############################################
+    ### Example 3: Email Spam Classification ###
+    ############################################
+    print("\n\nExample 3: Email Spam Classification")
+    print("-"*50)
 
-print(f"Best fitness score for sentiment analysis: {BestScore}")
+    SpamData = pd.DataFrame([
+        {"email_text": "You've won $1000! Click here to claim", "category": "spam"},
+        {"email_text": "Meeting scheduled for tomorrow at 2pm", "category": "ham"},
+        {"email_text": "URGENT: Verify your account now!!!", "category": "spam"},
+        {"email_text": "Please review the attached document", "category": "ham"},
+    ])
 
-# Example 3: Email Spam Classification
-print("\n\nExample 3: Email Spam Classification")
-print("-"*50)
+    # Configure for spam classification
+    SpamConfig = ClassificationTaskConfig(
+        Labels=["spam", "ham"],
+        TaskDescription="Determine if the following email is spam or ham (legitimate):",
+        DataColumnName="email_text",
+        LabelColumnName="category"
+    )
 
-SpamData = pd.DataFrame([
-    {"email_text": "You've won $1000! Click here to claim", "category": "spam"},
-    {"email_text": "Meeting scheduled for tomorrow at 2pm", "category": "ham"},
-    {"email_text": "URGENT: Verify your account now!!!", "category": "spam"},
-    {"email_text": "Please review the attached document", "category": "ham"},
-])
+    print("Running evolution for spam classification...")
+    FinalPopulation = await RunEvolution(SpamData, SpamConfig, PopulationSize, Generations)
+    
+    # Evaluate final population in parallel
+    EvaluationTasks = [EvaluatePrompt(Prompt, SpamData, SpamConfig) for Prompt in FinalPopulation]
+    Scores = await asyncio.gather(*EvaluationTasks)
+    
+    BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
+    BestScore = Scores[BestIndex]
 
-# Configure for spam classification
-SpamConfig = ClassificationTaskConfig(
-    Labels=["spam", "ham"],
-    TaskDescription="Determine if the following email is spam or ham (legitimate):",
-    DataColumnName="email_text",
-    LabelColumnName="category"
-)
+    print(f"\nBest fitness score for spam classification: {BestScore}")
 
-print("Running evolution for spam classification...")
-FinalPopulation = RunEvolution(SpamData, SpamConfig, PopulationSize, Generations)
-Scores = [EvaluatePrompt(Prompt, SpamData, SpamConfig) for Prompt in FinalPopulation]
-BestIndex = max(range(len(Scores)), key=Scores.__getitem__)
-BestScore = Scores[BestIndex]
-
-print(f"Best fitness score for spam classification: {BestScore}")
+if __name__ == "__main__":
+    asyncio.run(main())

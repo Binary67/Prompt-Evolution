@@ -1,19 +1,54 @@
 import random
 import re
 import pandas as pd
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI, RateLimitError
 import os
+import asyncio
+from typing import List, Dict, Tuple
+import time
 
 os.environ["AZURE_OPENAI_API_KEY"] = "3026be1058fa4f0c9e3416d3d8227657"
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://ptsg-5talendopenai01.openai.azure.com/"
 os.environ["AZURE_OPENAI_API_VERSION"] = "2024-02-01"
 os.environ["AZURE_OPENAI_DEPLOYMENT"] = "myTalentX_GPT4omini"
 
-client = AzureOpenAI(
+Client = AsyncAzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
 )
+
+# Rate limiting configuration
+MAX_CONCURRENT_REQUESTS = 3  # Adjust based on your Azure OpenAI tier limits
+REQUEST_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+MAX_RETRIES = 15
+INITIAL_BACKOFF = 1  # Initial backoff in seconds
+
+async def CallOpenAIWithBackoff(Func, *Args, **Kwargs):
+    """Call OpenAI API with exponential backoff on rate limit errors."""
+    Backoff = INITIAL_BACKOFF
+    LastException = None
+    
+    for Attempt in range(MAX_RETRIES):
+        try:
+            async with REQUEST_SEMAPHORE:  # Limit concurrent requests
+                return await Func(*Args, **Kwargs)
+        except RateLimitError as e:
+            LastException = e
+            if Attempt < MAX_RETRIES - 1:
+                # Exponential backoff with jitter
+                SleepTime = Backoff + random.uniform(0, 0.1 * Backoff)
+                print(f"Rate limit hit. Retrying in {SleepTime:.2f} seconds... (Attempt {Attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(SleepTime)
+                Backoff *= 2  # Exponential backoff
+            else:
+                print(f"Max retries reached. Last error: {e}")
+                raise
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            raise
+    
+    raise LastException
 
 class ClassificationTaskConfig:
     """Configuration for classification tasks."""
@@ -40,7 +75,7 @@ class ClassificationTaskConfig:
         else:
             self.TaskDescription = TaskDescription
 
-def GeneratePromptSample(TaskConfig: ClassificationTaskConfig, RoleAssignment: str = "You are an expert classification assistant.") -> dict:
+async def GeneratePromptSample(TaskConfig: ClassificationTaskConfig, RoleAssignment: str = "You are an expert classification assistant.") -> dict:
     """
     Calls Azure OpenAI once and returns a dictionary describing a prompt.
     The returned mapping includes every slot from the skeleton, and the
@@ -108,10 +143,11 @@ def GeneratePromptSample(TaskConfig: ClassificationTaskConfig, RoleAssignment: s
         )
     }
 
-    Response = client.chat.completions.create(
-        model = 'gpt-4o',
-        messages = [SystemMessage, UserMessage],
-        temperature = 1,
+    Response = await CallOpenAIWithBackoff(
+        Client.chat.completions.create,
+        model='gpt-4o',
+        messages=[SystemMessage, UserMessage],
+        temperature=1,
     )
 
     PromptResult = Response.choices[0].message.content.strip()
@@ -196,11 +232,11 @@ def Crossover(ParentOne: dict, ParentTwo: dict, Probability: float = 0.5) -> dic
 
     return ChildPrompt
 
-def MutatePromptField(Prompt: dict, Field: str) -> None:
+async def MutatePromptField(Prompt: dict, Field: str) -> dict:
     """Rephrase a slot in ``Prompt`` using Azure OpenAI."""
 
     if Field not in Prompt or not Prompt[Field]:
-        return
+        return Prompt
 
     SystemMessage = {
         "role": "system",
@@ -212,10 +248,11 @@ def MutatePromptField(Prompt: dict, Field: str) -> None:
         "content": f"Rephrase the following so it keeps the same meaning:\n{Prompt[Field]}",
     }
 
-    Response = client.chat.completions.create(
-        model = 'gpt-4o',
-        messages = [SystemMessage, UserMessage],
-        temperature = 1,
+    Response = await CallOpenAIWithBackoff(
+        Client.chat.completions.create,
+        model='gpt-4o',
+        messages=[SystemMessage, UserMessage],
+        temperature=1,
     )
 
     Prompt[Field] = Response.choices[0].message.content.strip()
@@ -232,7 +269,7 @@ def CombineString(dictPrompt):
   return CombinedString
 
 
-def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str, TaskConfig: ClassificationTaskConfig) -> pd.DataFrame:
+async def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str, TaskConfig: ClassificationTaskConfig) -> pd.DataFrame:
     """Apply a classification ``Prompt`` to each text entry in ``DataFrame``.
 
     Parameters
@@ -250,8 +287,7 @@ def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str, TaskConfig: Classifi
         A copy of ``DataFrame`` with a new ``Prediction`` column.
     """
 
-    Predictions = []
-    for TextData in DataFrame[TaskConfig.DataColumnName]:
+    async def ClassifySingleText(TextData: str) -> str:
         FilledPrompt = Prompt.replace("{Text}", TextData)
 
         SystemMessage = {
@@ -261,14 +297,29 @@ def ApplyPromptToData(DataFrame: pd.DataFrame, Prompt: str, TaskConfig: Classifi
 
         UserMessage = {"role": "user", "content": FilledPrompt}
 
-        Response = client.chat.completions.create(
+        Response = await CallOpenAIWithBackoff(
+            Client.chat.completions.create,
             model='gpt-4o',
             messages=[SystemMessage, UserMessage],
             temperature=0,
         )
 
-        Prediction = Response.choices[0].message.content.strip()
-        Predictions.append(Prediction)
+        return Response.choices[0].message.content.strip()
+    
+    # Process in smaller batches to avoid overwhelming the API
+    BatchSize = MAX_CONCURRENT_REQUESTS
+    AllTexts = DataFrame[TaskConfig.DataColumnName].tolist()
+    Predictions = []
+    
+    for i in range(0, len(AllTexts), BatchSize):
+        Batch = AllTexts[i:i + BatchSize]
+        Tasks = [ClassifySingleText(TextData) for TextData in Batch]
+        BatchPredictions = await asyncio.gather(*Tasks)
+        Predictions.extend(BatchPredictions)
+        
+        # Small delay between batches to be nice to the API
+        if i + BatchSize < len(AllTexts):
+            await asyncio.sleep(0.1)
 
     Result = DataFrame.copy()
     Result["Prediction"] = Predictions
@@ -303,51 +354,108 @@ def CalculateFitnessScore(ResultFrame: pd.DataFrame, TaskConfig: ClassificationT
     return FitnessScore
 
 
-def GeneratePopulation(PopulationSize: int, TaskConfig: ClassificationTaskConfig) -> list:
+async def GeneratePopulation(PopulationSize: int, TaskConfig: ClassificationTaskConfig) -> list:
     """Create an initial population of prompts."""
 
-    return [GeneratePromptSample(TaskConfig) for _ in range(PopulationSize)]
+    # Generate in smaller batches to avoid rate limits
+    BatchSize = MAX_CONCURRENT_REQUESTS
+    Population = []
+    
+    for i in range(0, PopulationSize, BatchSize):
+        RemainingSize = min(BatchSize, PopulationSize - i)
+        Tasks = [GeneratePromptSample(TaskConfig) for _ in range(RemainingSize)]
+        BatchResults = await asyncio.gather(*Tasks)
+        Population.extend(BatchResults)
+        
+        # Small delay between batches
+        if i + BatchSize < PopulationSize:
+            await asyncio.sleep(0.1)
+    
+    return Population
 
 
-def MutatePrompt(Prompt: dict, MutationRate: float) -> dict:
+async def MutatePrompt(Prompt: dict, MutationRate: float) -> dict:
     """Mutate fields within ``Prompt`` with probability ``MutationRate``."""
 
+    MutationTasks = []
+    FieldsToMutate = []
+    
     for Field in PromptSkeletonKeys:
         if random.random() < MutationRate:
-            MutatePromptField(Prompt, Field)
-    return Prompt
+            FieldsToMutate.append(Field)
+    
+    # Create a copy of the prompt to avoid mutation conflicts
+    MutatedPrompt = Prompt.copy()
+    
+    # Run mutations sequentially to avoid too many concurrent requests
+    for Field in FieldsToMutate:
+        MutatedPrompt = await MutatePromptField(MutatedPrompt, Field)
+    
+    return MutatedPrompt
 
 
-def EvaluatePrompt(Prompt: dict, DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig) -> float:
+async def EvaluatePrompt(Prompt: dict, DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig) -> float:
     """Compute the fitness score for ``Prompt`` on ``DataFrame``."""
 
     PromptText = CombineString(Prompt)
-    ResultFrame = ApplyPromptToData(DataFrame, PromptText, TaskConfig)
+    ResultFrame = await ApplyPromptToData(DataFrame, PromptText, TaskConfig)
     return CalculateFitnessScore(ResultFrame, TaskConfig)
 
 
-def RunEvolution(DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig, 
+async def RunEvolution(DataFrame: pd.DataFrame, TaskConfig: ClassificationTaskConfig, 
                  PopulationSize: int, Generations: int,
                  MutationRate: float = 0.1, CrossoverProbability: float = 0.5,
                  Elitism: int = 1) -> list:
     """Evolve prompts over multiple generations."""
 
-    Population = GeneratePopulation(PopulationSize, TaskConfig)
+    Population = await GeneratePopulation(PopulationSize, TaskConfig)
 
-    for _ in range(Generations):
-        Scores = [EvaluatePrompt(Prompt, DataFrame, TaskConfig) for Prompt in Population]
+    for Generation in range(Generations):
+        print(f"\nGeneration {Generation + 1}/{Generations}")
+        
+        # Evaluate prompts in smaller batches
+        Scores = []
+        BatchSize = MAX_CONCURRENT_REQUESTS
+        
+        for i in range(0, len(Population), BatchSize):
+            Batch = Population[i:i + BatchSize]
+            EvaluationTasks = [EvaluatePrompt(Prompt, DataFrame, TaskConfig) for Prompt in Batch]
+            BatchScores = await asyncio.gather(*EvaluationTasks)
+            Scores.extend(BatchScores)
+            
+            # Progress indicator
+            print(f"  Evaluated {min(i + BatchSize, len(Population))}/{len(Population)} prompts")
+            
+            # Small delay between batches
+            if i + BatchSize < len(Population):
+                await asyncio.sleep(0.1)
+        
         ScoredPopulation = list(zip(Population, Scores))
         ScoredPopulation.sort(key=lambda Item: Item[1], reverse=True)
 
+        # Print best score
+        print(f"  Best fitness: {ScoredPopulation[0][1]:.3f}")
+
         NewPopulation = [Item[0] for Item in ScoredPopulation[:Elitism]]
 
+        # Create offspring in smaller batches
         while len(NewPopulation) < PopulationSize:
-            ParentOne = random.choice(Population)
-            ParentTwo = random.choice(Population)
-            Child = Crossover(ParentOne, ParentTwo, CrossoverProbability)
-            Child = MutatePrompt(Child, MutationRate)
-            NewPopulation.append(Child)
+            RemainingSize = min(BatchSize, PopulationSize - len(NewPopulation))
+            CrossoverTasks = []
+            
+            for _ in range(RemainingSize):
+                ParentOne = random.choice([Item[0] for Item in ScoredPopulation[:len(ScoredPopulation)//2]])
+                ParentTwo = random.choice([Item[0] for Item in ScoredPopulation[:len(ScoredPopulation)//2]])
+                Child = Crossover(ParentOne, ParentTwo, CrossoverProbability)
+                CrossoverTasks.append(MutatePrompt(Child, MutationRate))
+            
+            MutatedChildren = await asyncio.gather(*CrossoverTasks)
+            NewPopulation.extend(MutatedChildren)
+            
+            # Small delay between batches
+            if len(NewPopulation) < PopulationSize:
+                await asyncio.sleep(0.1)
 
-        Population = NewPopulation
+        Population = NewPopulation[:PopulationSize]
 
     return Population
