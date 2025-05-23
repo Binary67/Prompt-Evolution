@@ -7,17 +7,6 @@ import asyncio
 from typing import List, Dict, Tuple
 import time
 
-os.environ["AZURE_OPENAI_API_KEY"] = "3026be1058fa4f0c9e3416d3d8227657"
-os.environ["AZURE_OPENAI_ENDPOINT"] = "https://ptsg-5talendopenai01.openai.azure.com/"
-os.environ["AZURE_OPENAI_API_VERSION"] = "2024-02-01"
-os.environ["AZURE_OPENAI_DEPLOYMENT"] = "myTalentX_GPT4omini"
-
-Client = AsyncAzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-)
-
 # Rate limiting configuration
 MAX_CONCURRENT_REQUESTS = 3  # Adjust based on your Azure OpenAI tier limits
 REQUEST_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
